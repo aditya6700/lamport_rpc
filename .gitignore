@@ -1,5 +1,2 @@
-./venv/Lib/
-venv/Lib/
-./venv/Lib
-./venv/lib
 /venv/Lib
+*/__pycache__
