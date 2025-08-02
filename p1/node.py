@@ -1,71 +1,105 @@
 # Process 1 - Node
 
-from config import PROCESS_ID, PEERS
-import client
-import server
 import time
-import threading
+import xmlrpc.client
 
-lamport_clock = 0
-request_queue = []
-replies_received = set()
-want_cs = False
+class Node:
+    def __init__(self, pid, peers):
+        self.pid = pid
+        self.peers = peers
+        self.lamport_clock = 0
+        self.reply_count = 0
+        self.pending_replies = set()
+        self.in_critical_section = False
+        
+    def increment_clock(self):
+        self.lamport_clock += 1
 
-def increment_clock(received_ts=None):
-    global lamport_clock
-    if received_ts is None:
-        lamport_clock += 1
-    else:
-        lamport_clock = max(lamport_clock, received_ts) + 1
+    def receive_request(self, from_pid, timestamp):
+        self.lamport_clock = max(self.lamport_clock, timestamp)
+        self.increment_clock()
 
-def receive_request(timestamp, from_id):
-    increment_clock(timestamp)
-    print(f"[{PROCESS_ID}] Received request from {from_id} with ts={timestamp}")
-    request_queue.append((timestamp, from_id))
-    request_queue.sort()
-    return True
+        if self.in_critical_section:
+            print(f"[RPC Client: {self.pid}] ---- Received REQUEST from Node {from_pid} while in CS! Denying access")
+            return False
+        else:
+            print(f"[RPC Client: {self.pid}] ---- Received REQUEST from Node {from_pid} (ts={timestamp}), replying")
+            return True
 
-def receive_reply(from_id):
-    replies_received.add(from_id)
-    print(f"[{PROCESS_ID}] Received reply from {from_id}")
-    return True
+    def receive_release(self, from_pid):
+        print(f"[RPC Client: {self.pid}] ---- Received RELEASE from Node {from_pid}")
+        return True
+    
+    def request_critical_section(self):
+        if self.in_critical_section:
+            print(f"[RPC Client: {self.pid}] Already in CS, cannot request again.")
+            return
+    
+        self.increment_clock()
+        ts = self.lamport_clock
+        self.reply_count = 0
+        print(f"[RPC Client: {self.pid}] ---- Requesting CS with timestamp {ts}")
+        
+        self.pending_replies = set(self.peers.keys())
 
-def receive_release(from_id):
-    global request_queue
-    request_queue = [r for r in request_queue if r[1] != from_id]
-    print(f"[{PROCESS_ID}] {from_id} released CS")
-    return True
+        while self.reply_count < len(self.peers):
+            for peer in list(self.pending_replies):
+                to_url = self.peers[peer]
+                try:
+                    self.send_request(to_url, peer, self.pid, ts)
+                except Exception as e:
+                    print(f"[RPC Client: {self.pid}] ---- Failed to contact {peer}: {e}")
 
-def request_critical_section():
-    global want_cs, replies_received
-    increment_clock()
-    want_cs = True
-    replies_received = set()
+            if self.reply_count < len(self.peers):
+                print(f"[RPC Client: {self.pid}] ---- Waiting... Will retry for: {self.pending_replies}")
+                time.sleep(2)
+    
+    def send_request(self, to_url, to_peer, from_id, timestamp):
+        try:
+            proxy = xmlrpc.client.ServerProxy(to_url)
+            response = proxy.receive_request(from_id, timestamp)
+            
+            if response is True:
+                self.receive_reply(to_peer)
+            else:
+                print(f"[RPC Client: {from_id}] ---- Request DENIED by {to_peer} - CS might be busy")
 
-    print(f"[{PROCESS_ID}] Requesting CS with ts={lamport_clock}")
-    request_queue.append((lamport_clock, PROCESS_ID))
-    client.send_request_to_all(lamport_clock, PROCESS_ID)
+        except Exception as e:
+            print(f"[RPC Client: {from_id}] ---- Failed to send request to {to_peer}: {e}")
+            
+    
+    def receive_reply(self, from_pid):
+        self.reply_count += 1
+        print(f"[RPC Client: {self.pid}] ---- Received reply from Node {from_pid} ({self.reply_count}/{len(self.peers)})")
 
-    # Wait until this node's request is at the front and all replies received
-    while not is_okay_to_enter_cs():
-        time.sleep(0.5)
+        if hasattr(self, 'pending_replies'):
+            self.pending_replies.discard(from_pid)
 
-    enter_critical_section()
+        if self.reply_count == len(self.peers):
+            self.enter_critical_section()
 
-def is_okay_to_enter_cs():
-    return (
-        request_queue[0][1] == PROCESS_ID
-        and len(replies_received) == len(PEERS)
-    )
-
-def enter_critical_section():
-    print(f"[{PROCESS_ID}] 🔒 Entering Critical Section")
-    time.sleep(2)  # Simulate doing some work
-    print(f"[{PROCESS_ID}] 🔓 Exiting Critical Section")
-    release_critical_section()
-
-def release_critical_section():
-    global want_cs
-    request_queue.pop(0)
-    want_cs = False
-    client.send_release_to_all(PROCESS_ID)
+        return True
+    
+    def enter_critical_section(self):
+        self.in_critical_section = True
+        print(f"[RPC Client: {self.pid}] >>> ENTERING CRITICAL SECTION <<<")
+        print("executing critical section....")
+        
+        while self.in_critical_section:
+            user_input = input("Do you want to exit from CS and release? (y/n): ").strip().lower()
+            if user_input == 'y':
+                print(f"[RPC Client: {self.pid}] >>> EXITING CRITICAL SECTION <<<")
+                self.in_critical_section = False
+                for peer, to_url in self.peers.items():
+                    self.send_release(peer, to_url)
+            else:
+                print(f"[RPC Client: {self.pid}] ---- Staying in CS. Will ask again in 5 seconds.")
+                time.sleep(5)
+            
+    def send_release(self, to_peer, to_url):
+        try:
+            proxy = xmlrpc.client.ServerProxy(to_url)
+            proxy.receive_release(self.pid)
+            print(f"[RPC Client: {self.pid}] ---- Sent release to {to_peer}")
+        except Exception as e:
+            print(f"[RPC Client: {self.pid}] ---- Failed to send release to {to_peer}: {e}")
