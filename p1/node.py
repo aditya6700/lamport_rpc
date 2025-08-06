@@ -2,6 +2,7 @@
 
 import time
 import xmlrpc.client
+import heapq
 
 class Node:
     def __init__(self, pid, peers):
@@ -11,24 +12,48 @@ class Node:
         self.reply_count = 0
         self.pending_replies = set()
         self.in_critical_section = False
+        self.request_queue = []  # Queue for pending requests
         
     def increment_clock(self):
         self.lamport_clock += 1
 
     def receive_request(self, from_pid, timestamp):
-        self.lamport_clock = max(self.lamport_clock, timestamp)
-        self.increment_clock()
-
-        if self.in_critical_section:
-            print(f"[RPC Client: {self.pid}] ---- Received REQUEST from Node {from_pid} while in CS! Denying access")
+        self.lamport_clock = max(self.lamport_clock, timestamp) + 1
+        request_tuple = (timestamp, from_pid)
+        if self.in_critical_section or self.request_queue:
+            if request_tuple not in self.request_queue:
+                print(f"[RPC Client: {self.pid}] ---- Queuing REQUEST from Node {from_pid} (ts={timestamp})")
+                heapq.heappush(self.request_queue, request_tuple)
+            else:
+                print(f"[RPC Client: {self.pid}] ---- Duplicate REQUEST from Node {from_pid} ignored.")
             return False
         else:
-            print(f"[RPC Client: {self.pid}] ---- Received REQUEST from Node {from_pid} (ts={timestamp}), replying")
-            return True
+            print(f"[RPC Client: {self.pid}] ---- Replying immediately to Node {from_pid} (ts={timestamp})")
+            self.increment_clock()
+            return (True, self.lamport_clock)
 
-    def receive_release(self, from_pid):
+    def receive_release(self, from_pid, timestamp):
+        self.lamport_clock = max(self.lamport_clock, timestamp) + 1
         print(f"[RPC Client: {self.pid}] ---- Received RELEASE from Node {from_pid}")
-        return True
+
+        # Process next queued request (if any)
+        if self.request_queue:
+            next_ts, next_pid = heapq.heappop(self.request_queue)
+            print(f"[RPC Client: {self.pid}] ---- Sending reply to queued Node {next_pid} (ts={next_ts})")
+            self.increment_clock()  # Increment before sending reply
+            self.send_reply_to_queued_request(next_pid, self.lamport_clock)
+
+    def send_reply_to_queued_request(self, to_pid, reply_ts):
+        if to_pid in self.peers:
+            to_url = self.peers[to_pid]
+            try:
+                proxy = xmlrpc.client.ServerProxy(to_url)
+                proxy.receive_reply(self.pid, reply_ts)  # Include timestamp
+                print(f"[RPC Client: {self.pid}] ---- Sent reply to Node {to_pid} (ts={reply_ts})")
+            except Exception as e:
+                print(f"[RPC Client: {self.pid}] ---- Failed to send reply to Node {to_pid}: {e}")
+                # Re-add to queue if failed
+                heapq.heappush(self.request_queue, (reply_ts, to_pid))
     
     def request_critical_section(self):
         if self.in_critical_section:
@@ -51,16 +76,18 @@ class Node:
                     print(f"[RPC Client: {self.pid}] ---- Failed to contact {peer}: {e}")
 
             if self.reply_count < len(self.peers):
-                print(f"[RPC Client: {self.pid}] ---- Waiting... Will retry for: {self.pending_replies}")
-                time.sleep(2)
+                print(f"[RPC Client: {self.pid}] ---- Waiting... Will retry after 30 seconds for: {self.pending_replies}")
+                time.sleep(30)
     
     def send_request(self, to_url, to_peer, from_id, timestamp):
         try:
             proxy = xmlrpc.client.ServerProxy(to_url)
             response = proxy.receive_request(from_id, timestamp)
             
-            if response is True:
-                self.receive_reply(to_peer)
+            # Updated to handle (success, timestamp) tuple response
+            if isinstance(response, list) and response[0] is True:
+                _, reply_timestamp = response
+                self.receive_reply(to_peer, reply_timestamp)  # Pass timestamp to receive_reply
             else:
                 print(f"[RPC Client: {from_id}] ---- Request DENIED by {to_peer} - CS might be busy")
 
@@ -68,9 +95,11 @@ class Node:
             print(f"[RPC Client: {from_id}] ---- Failed to send request to {to_peer}: {e}")
             
     
-    def receive_reply(self, from_pid):
+    def receive_reply(self, from_pid, timestamp):
+        # Update Lamport clock
+        self.lamport_clock = max(self.lamport_clock, timestamp) + 1
         self.reply_count += 1
-        print(f"[RPC Client: {self.pid}] ---- Received reply from Node {from_pid} ({self.reply_count}/{len(self.peers)})")
+        print(f"[RPC Client: {self.pid}] ---- Received REPLY from Node {from_pid} (ts={timestamp}) ({self.reply_count}/{len(self.peers)})")
 
         if hasattr(self, 'pending_replies'):
             self.pending_replies.discard(from_pid)
@@ -78,7 +107,6 @@ class Node:
         if self.reply_count == len(self.peers):
             self.enter_critical_section()
 
-        return True
     
     def enter_critical_section(self):
         self.in_critical_section = True
@@ -99,7 +127,7 @@ class Node:
     def send_release(self, to_peer, to_url):
         try:
             proxy = xmlrpc.client.ServerProxy(to_url)
-            proxy.receive_release(self.pid)
+            proxy.receive_release(self.pid, self.lamport_clock)
             print(f"[RPC Client: {self.pid}] ---- Sent release to {to_peer}")
         except Exception as e:
             print(f"[RPC Client: {self.pid}] ---- Failed to send release to {to_peer}: {e}")

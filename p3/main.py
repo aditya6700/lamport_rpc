@@ -12,7 +12,7 @@ def run():
     time.sleep(1)  # Let the server start
 
     # Only one process should request CS
-    user_input = input(f"Do you want Node {PROCESS_ID} to enter Critical Section? (y/n): ")
+    user_input = input(f"Do you want Node {PROCESS_ID} to enter Critical Section? (y/n): \n")
     if user_input.strip().lower() == 'y':
         node.request_critical_section()
 
