@@ -5,6 +5,7 @@ import xmlrpc.client
 import heapq
 
 class Node:
+    # class variables
     def __init__(self, pid, peers):
         self.pid = pid
         self.peers = peers
@@ -12,14 +13,18 @@ class Node:
         self.reply_count = 0
         self.pending_replies = set()
         self.in_critical_section = False
-        self.request_queue = []  # Queue for pending requests
-        
+        self.request_queue = [] 
+    
+    # lamport clock Rule 1
     def increment_clock(self):
         self.lamport_clock += 1
 
     def receive_request(self, from_pid, timestamp):
+        # lamport clock Rule 2
         self.lamport_clock = max(self.lamport_clock, timestamp) + 1
         request_tuple = (timestamp, from_pid)
+        
+        # Check for duplicate request and reply
         if self.in_critical_section or self.request_queue:
             if request_tuple not in self.request_queue:
                 print(f"[RPC Client: {self.pid}] ---- Queuing REQUEST from Node {from_pid} (ts={timestamp})")
@@ -67,6 +72,7 @@ class Node:
         
         self.pending_replies = set(self.peers.keys())
 
+        # send request for every 30 seconds if response is not received
         while self.reply_count < len(self.peers):
             for peer in list(self.pending_replies):
                 to_url = self.peers[peer]
@@ -84,7 +90,7 @@ class Node:
             proxy = xmlrpc.client.ServerProxy(to_url)
             response = proxy.receive_request(from_id, timestamp)
             
-            # Updated to handle (success, timestamp) tuple response
+            # Handling request
             if isinstance(response, list) and response[0] is True:
                 _, reply_timestamp = response
                 self.receive_reply(to_peer, reply_timestamp)  # Pass timestamp to receive_reply
@@ -101,18 +107,21 @@ class Node:
         self.reply_count += 1
         print(f"[RPC Client: {self.pid}] ---- Received REPLY from Node {from_pid} (ts={timestamp}) ({self.reply_count}/{len(self.peers)})")
 
+        # remove from the queue
         if hasattr(self, 'pending_replies'):
             self.pending_replies.discard(from_pid)
 
+        # enter into critical section if all replies are received
         if self.reply_count == len(self.peers):
             self.enter_critical_section()
 
-    
+
     def enter_critical_section(self):
         self.in_critical_section = True
         print(f"[RPC Client: {self.pid}] >>> ENTERING CRITICAL SECTION <<<")
         print("executing critical section....")
         
+        # prompt user to exit from critical section
         while self.in_critical_section:
             user_input = input("Do you want to exit from CS and release? (y/n): ").strip().lower()
             if user_input == 'y':
@@ -124,6 +133,7 @@ class Node:
                 print(f"[RPC Client: {self.pid}] ---- Staying in CS. Will ask again in 5 seconds.")
                 time.sleep(5)
             
+    # send release to all peers
     def send_release(self, to_peer, to_url):
         try:
             proxy = xmlrpc.client.ServerProxy(to_url)
